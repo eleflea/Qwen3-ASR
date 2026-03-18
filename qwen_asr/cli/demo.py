@@ -378,6 +378,10 @@ def build_demo(
                     value="Auto",
                     interactive=True,
                 )
+                context_in = gr.Textbox(
+                    label="Context (上下文，optional)",
+                    lines=2,
+                )
                 if has_aligner:
                     ts_in = gr.Checkbox(
                         label="Return Timestamps (是否返回时间戳)",
@@ -408,7 +412,7 @@ def build_demo(
         else:
             out_ts_html = gr.State("")
 
-        def run(audio_upload: Any, lang_disp: str, return_ts: bool):
+        def run(audio_upload: Any, lang_disp: str, return_ts: bool, context: str = ""):
             audio_obj = _parse_audio_any(audio_upload)
 
             language = None
@@ -421,6 +425,7 @@ def build_demo(
                 audio=audio_obj,
                 language=language,
                 return_time_stamps=return_ts,
+                context=context,
             )
             if not isinstance(results, list) or len(results) != 1:
                 raise RuntimeError(
@@ -459,7 +464,7 @@ def build_demo(
         if has_aligner:
             btn.click(
                 run,
-                inputs=[audio_in, lang_in, ts_in],
+                inputs=[audio_in, lang_in, ts_in, context_in],
                 outputs=[out_lang, out_text, out_ts, out_ts_html],
             )
             viz_btn.click(
@@ -470,7 +475,7 @@ def build_demo(
         else:
             btn.click(
                 run,
-                inputs=[audio_in, lang_in, ts_in],
+                inputs=[audio_in, lang_in, ts_in, context_in],
                 outputs=[out_lang, out_text],
             )
 
