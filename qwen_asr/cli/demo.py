@@ -22,6 +22,7 @@ import base64
 import io
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import gradio as gr
@@ -29,6 +30,45 @@ import numpy as np
 import torch
 from qwen_asr import Qwen3ASRModel
 from scipy.io.wavfile import write as wav_write
+import jieba
+
+
+CHINESE_TEXT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
+HALLUCINATION_EQUAL_TS_RATIO_THRESHOLD = 0.4
+
+def tokenize_context(context: Optional[str]) -> str:
+    if not context:
+        return ""
+
+    tokens: list[str] = []
+    cursor = 0
+
+    for match in CHINESE_TEXT_RE.finditer(context):
+        start, end = match.span()
+
+        if start > cursor:
+            non_chinese_chunk = context[cursor:start]
+            tokens.extend(non_chinese_chunk.split())
+
+        chinese_chunk = match.group(0)
+        tokens.extend(token.strip() for token in jieba.cut(chinese_chunk) if token.strip())
+        cursor = end
+
+    if cursor < len(context):
+        tail_chunk = context[cursor:]
+        tokens.extend(tail_chunk.split())
+
+    return " ".join(tokens) if tokens else ""
+
+
+def equal_timestamp_ratio(timestamps: list[dict]) -> float:
+    if not timestamps:
+        return 0.0
+
+    equal_count = sum(
+        1 for item in timestamps if abs(float(item["start_time"]) - float(item["end_time"])) < 1e-6
+    )
+    return equal_count / len(timestamps)
 
 
 def _title_case_display(s: str) -> str:
@@ -234,7 +274,6 @@ def _default_backend_kwargs(backend: str) -> Dict[str, Any]:
         )
     else:
         return dict(
-            gpu_memory_utilization=0.8,
             max_inference_batch_size=4,
             max_new_tokens=4096,
         )
@@ -425,7 +464,7 @@ def build_demo(
                 audio=audio_obj,
                 language=language,
                 return_time_stamps=return_ts,
-                context=context,
+                context=tokenize_context(context),
             )
             if not isinstance(results, list) or len(results) != 1:
                 raise RuntimeError(
@@ -446,6 +485,11 @@ def build_demo(
                         )
                         for t in (getattr(r, "time_stamps", None) or [])
                     ]
+                    same_ts_ratio = equal_timestamp_ratio(ts_payload)
+                    if context and same_ts_ratio > HALLUCINATION_EQUAL_TS_RATIO_THRESHOLD:
+                        ts_payload = None
+                        r.language = ""
+                        r.text = ""
                 return (
                     getattr(r, "language", "") or "",
                     getattr(r, "text", "") or "",
