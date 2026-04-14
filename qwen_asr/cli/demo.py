@@ -34,7 +34,9 @@ import jieba
 
 
 CHINESE_TEXT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
-HALLUCINATION_EQUAL_TS_RATIO_THRESHOLD = 0.4
+EQUAL_TIMESTAMP_RATIO_EXCLUDED_TOKENS = {"我"}
+HALLUCINATION_EQUAL_TS_RATIO_RETRY_THRESHOLD = 0.1
+HALLUCINATION_EQUAL_TS_RATIO_THRESHOLD = 0.8
 
 def tokenize_context(context: Optional[str]) -> str:
     if not context:
@@ -65,10 +67,19 @@ def equal_timestamp_ratio(timestamps: list[dict]) -> float:
     if not timestamps:
         return 0.0
 
+    filtered_timestamps = [
+        item for item in timestamps
+        if str(item.get("text", "") or "") not in EQUAL_TIMESTAMP_RATIO_EXCLUDED_TOKENS
+    ]
+    if not filtered_timestamps:
+        return 0.0
+
     equal_count = sum(
-        1 for item in timestamps if abs(float(item["start_time"]) - float(item["end_time"])) < 1e-6
+        1
+        for item in filtered_timestamps
+        if abs(float(item["start_time"]) - float(item["end_time"])) < 1e-6
     )
-    return equal_count / len(timestamps)
+    return equal_count / len(filtered_timestamps)
 
 
 def _title_case_display(s: str) -> str:
@@ -460,36 +471,44 @@ def build_demo(
 
             return_ts = bool(return_ts) and has_aligner
 
-            results = asr.transcribe(
-                audio=audio_obj,
-                language=language,
-                return_time_stamps=return_ts,
-                context=tokenize_context(context),
-            )
-            if not isinstance(results, list) or len(results) != 1:
-                raise RuntimeError(
-                    f"Unexpected result size: {type(results)} "
-                    f"len={len(results) if isinstance(results, list) else 'N/A'}"
+            def _transcribe_once(context_for_run: str):
+                results = asr.transcribe(
+                    audio=audio_obj,
+                    language=language,
+                    return_time_stamps=return_ts,
+                    context=tokenize_context(context_for_run),
                 )
+                if not isinstance(results, list) or len(results) != 1:
+                    raise RuntimeError(
+                        f"Unexpected result size: {type(results)} "
+                        f"len={len(results) if isinstance(results, list) else 'N/A'}"
+                    )
 
-            r = results[0]
-
-            if has_aligner:
-                ts_payload = None
+                result = results[0]
+                ts_payload_local = None
+                same_ts_ratio_local = 0.0
                 if return_ts:
-                    ts_payload = [
+                    ts_payload_local = [
                         dict(
                             text=getattr(t, "text", None),
                             start_time=getattr(t, "start_time", None),
                             end_time=getattr(t, "end_time", None),
                         )
-                        for t in (getattr(r, "time_stamps", None) or [])
+                        for t in (getattr(result, "time_stamps", None) or [])
                     ]
-                    same_ts_ratio = equal_timestamp_ratio(ts_payload)
-                    if context and same_ts_ratio > HALLUCINATION_EQUAL_TS_RATIO_THRESHOLD:
-                        ts_payload = None
-                        r.language = ""
-                        r.text = ""
+                    same_ts_ratio_local = equal_timestamp_ratio(ts_payload_local)
+
+                return result, ts_payload_local, same_ts_ratio_local
+
+            r, ts_payload, same_ts_ratio = _transcribe_once(context)
+            if return_ts and context and same_ts_ratio > HALLUCINATION_EQUAL_TS_RATIO_RETRY_THRESHOLD:
+                r, ts_payload, same_ts_ratio = _transcribe_once("")
+
+            if has_aligner:
+                if return_ts and same_ts_ratio > HALLUCINATION_EQUAL_TS_RATIO_THRESHOLD:
+                    ts_payload = None
+                    r.language = ""
+                    r.text = ""
                 return (
                     getattr(r, "language", "") or "",
                     getattr(r, "text", "") or "",
